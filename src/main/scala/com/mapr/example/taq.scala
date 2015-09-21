@@ -1,14 +1,14 @@
 package com.mapr.example
 
 import org.apache.spark._
-import java.text.SimpleDateFormat
-import org.joda.time.Interval
+import org.joda.time.{DateTime,Interval}
+import org.joda.time.format.{DateTimeFormat, DateTimeFormatter}
 import java.util.Date
 
 object TaqParse {
 
   case class TradeData(
-      tradeTime: Date,
+      tradeTime: DateTime,
       exchange: String,
       symbol: String,
       saleCondition: String,
@@ -36,6 +36,11 @@ object TaqParse {
     val barIntervalInSeconds = args(1).toInt
 
     val tradeDateString = file.first().trim.split("\\s+")(0)
+
+    val marketOpenTime =  DateTimeFormat.forPattern("'N'MMddyyyy HHmmss").parseDateTime(s"${tradeDateString} 093000")
+    val marketCloseTime =  DateTimeFormat.forPattern("'N'MMddyyyy HHmmss").parseDateTime(s"${tradeDateString} 160000")
+    val bars = marketOpenTime.getMillis.to(marketCloseTime.getMillis, barIntervalInSeconds*1000).map(n => new Interval(n, n+(barIntervalInSeconds*1000)))
+
     val trades = file.filter(line => !isHeaderLine(line)) // filter the header line
       .filter(line => line.contains('@'))                 // filter for regular trades
       .map(x => parseTaqTradeLine(x, tradeDateString))    //  parse the line into a TradeData case class
@@ -50,11 +55,12 @@ object TaqParse {
     line.contains("Record Count")
   }
 
+
   def parseTaqTradeLine(line: String, tradeDate: String) = {
     val lineList = line.toList
     val timeString = lineList.slice(0,9).mkString
     val dateString = s"${tradeDate} ${timeString}"
-    val tradeTime = new SimpleDateFormat("'N'MMddyyyy HHmmssSSS").parse(dateString)
+    val tradeTime = DateTimeFormat.forPattern("'N'MMddyyyy HHmmssSSS").parseDateTime(dateString)
 
     val exchange = lineList.slice(9,10)
     val symbol = lineList.slice(10,26)
