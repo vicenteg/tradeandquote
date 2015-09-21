@@ -1,7 +1,8 @@
-package org.apache.spark.examples
+package com.mapr.example
 
 import org.apache.spark._
 import java.text.SimpleDateFormat
+import org.joda.time.Interval
 import java.util.Date
 
 object TaqParse {
@@ -39,7 +40,8 @@ object TaqParse {
       .filter(line => line.contains('@'))                 // filter for regular trades
       .map(x => parseTaqTradeLine(x, tradeDateString))    //  parse the line into a TradeData case class
 
-    trades.take(10000).map(t => println(t))
+    val selectedSymbols = trades.filter(t => List("AAPL").contains(t.symbol))
+    selectedSymbols.collect.map(t => println(t))
 
     sc.stop()
   }
