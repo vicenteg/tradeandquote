@@ -1,14 +1,18 @@
 package com.mapr.example
 
 import org.apache.spark._
+import org.apache.spark.sql._
 import org.joda.time.{DateTime,Interval}
 import org.joda.time.format.{DateTimeFormat, DateTimeFormatter}
 import java.util.Date
 
 object TaqParse {
 
+  // case class to lend schema to our data for later
+  // conversion to DataFrame.
   case class TradeData(
-      tradeTime: DateTime,
+      tradeTime: Long,
+      bar: Long,
       exchange: String,
       symbol: String,
       saleCondition: String,
@@ -16,7 +20,7 @@ object TaqParse {
       tradePrice: Double,
       tradeStopStockIndicator: String,
       tradeCorrectionIndicator: String,
-      tradeSequenceNumber: Integer,
+      tradeSequenceNumber: Long,
       tradeSource: String,
       tradeReportingFacility: String,
       participantTimestamp: String,
@@ -24,29 +28,50 @@ object TaqParse {
       tradeReportingFacilityTimestamp: String,
       lineChange: String)
 
-  /** Usage: TaqParse [file] */
   def main(args: Array[String]) {
     if (args.length < 1) {
-      System.err.println("Usage: TaqParse <file>")
+      System.err.println("Usage: TaqParse <inputfile> <outputdir> <secondsPerBar>")
       System.exit(1)
     }
     val sparkConf = new SparkConf().setAppName("TaqParse")
     val sc = new SparkContext(sparkConf)
+    val sqlContext = new org.apache.spark.sql.SQLContext(sc)
+    // this is used to implicitly convert an RDD to a DataFrame.
+    import sqlContext.implicits._
+
+    // The input file we want to process.
     val file = sc.textFile(args(0))
-    val barIntervalInSeconds = args(1).toInt
+
+    val outputPath = args(1).toString()
+    val barIntervalInSeconds = args(2).toInt
 
     val tradeDateString = file.first().trim.split("\\s+")(0)
 
-    val marketOpenTime =  DateTimeFormat.forPattern("'N'MMddyyyy HHmmss").parseDateTime(s"${tradeDateString} 093000")
-    val marketCloseTime =  DateTimeFormat.forPattern("'N'MMddyyyy HHmmss").parseDateTime(s"${tradeDateString} 160000")
-    val bars = marketOpenTime.getMillis.to(marketCloseTime.getMillis, barIntervalInSeconds*1000).map(n => new Interval(n, n+(barIntervalInSeconds*1000)))
+    // Generate our "bars" which are just the joda Intervals spanning the beginning and
+    // end of the bar. These go from midnight to midnight, since TAQ data includes after
+    // hours activity.
+    val fmt = DateTimeFormat.forPattern("'N'MMddyyyy HHmmss")
+    val marketOpenTime =  fmt.parseDateTime(s"${tradeDateString} 000000")
+    val marketCloseTime =  marketOpenTime.plusDays(1)
+    val bars = marketOpenTime.getMillis.to(marketCloseTime.getMillis, barIntervalInSeconds*1000)
+      .map(n => new Interval(n, n+(barIntervalInSeconds*1000)))
 
     val trades = file.filter(line => !isHeaderLine(line)) // filter the header line
       .filter(line => line.contains('@'))                 // filter for regular trades
-      .map(x => parseTaqTradeLine(x, tradeDateString))    //  parse the line into a TradeData case class
+      .map(x => parseTaqTradeLine(x, tradeDateString, bars)) //  parse the line into a TradeData case class
+      .toDF()
 
-    val selectedSymbols = trades.filter(t => List("AAPL").contains(t.symbol))
-    selectedSymbols.collect.map(t => println(t))
+    // N.B. this rollup does not include bars where no trades took
+    // place for the symbol.
+    val tradeRollupByBar = trades.rollup($"symbol", $"bar").agg(Map(
+      "tradePrice" -> "avg",
+      "tradePrice" -> "max",
+      "tradePrice" -> "min",
+      "tradeVolume" -> "sum"
+    ))
+
+    //val selectedSymbols = trades.filter(t => List("AAPL").contains(t.symbol))
+    trades.write.parquet(outputPath)
 
     sc.stop()
   }
@@ -56,12 +81,11 @@ object TaqParse {
   }
 
 
-  def parseTaqTradeLine(line: String, tradeDate: String) = {
+  def parseTaqTradeLine(line: String, tradeDate: String, bars: Seq[Interval]) = {
     val lineList = line.toList
     val timeString = lineList.slice(0,9).mkString
     val dateString = s"${tradeDate} ${timeString}"
     val tradeTime = DateTimeFormat.forPattern("'N'MMddyyyy HHmmssSSS").parseDateTime(dateString)
-
     val exchange = lineList.slice(9,10)
     val symbol = lineList.slice(10,26)
     val saleCondition = lineList.slice(26,30)
@@ -78,7 +102,10 @@ object TaqParse {
     val tradeReportingFacilityTimestamp = lineList.slice(91,103)
     val lineChange = lineList.slice(103,105)
 
-    TradeData(tradeTime,
+    val bar = bars.filter(i => i.contains(tradeTime))
+
+    TradeData(tradeTime.getMillis(),
+      bar(0).getStartMillis(),
       exchange.mkString,
       symbol.mkString.trim(),
       saleCondition.mkString.trim(),
@@ -86,7 +113,7 @@ object TaqParse {
       tradePrice,
       tradeStopStockIndicator.mkString.trim(),
       tradeCorrectionIndicator.mkString.trim(),
-      tradeSequenceNumber.mkString.toInt,
+      tradeSequenceNumber.mkString.toLong,
       tradeSource.mkString.trim(),
       tradeReportingFacility.mkString.trim(),
       participantTimestamp.mkString.trim(),
